@@ -1,0 +1,709 @@
+
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Smart Parking AI</title>
+<style>
+:root{font-family:Arial,sans-serif;color:#172033;background:#f3f6fb}
+*{box-sizing:border-box}
+body{margin:0}
+.top{background:#14213d;color:white;padding:22px max(20px,calc((100% - 1100px)/2))}
+.top h1{margin:0 0 6px;font-size:26px}
+.top p{margin:0;color:#d8e1f3}
+.wrap{max-width:1100px;margin:24px auto;padding:0 18px}
+.stats{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin-bottom:18px}
+.stat,.panel{background:white;border-radius:14px;padding:18px;box-shadow:0 3px 14px #1720330d}
+.stat small{display:block;color:#68758b;margin-bottom:9px}
+.stat strong{font-size:28px}
+.layout{display:grid;grid-template-columns:1.5fr 1fr;gap:16px}
+.panel h2{font-size:18px;margin:0 0 14px}
+.stage{position:relative;width:100%;aspect-ratio:16/9;background:#101828;border-radius:10px;overflow:hidden}
+.media{position:absolute;inset:0;width:100%;height:100%;object-fit:contain}
+.media[hidden]{display:none}
+.overlay{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}
+.overlay.drawing{pointer-events:auto;touch-action:none;cursor:crosshair}
+.controls{display:flex;flex-wrap:wrap;gap:8px;margin:12px 0}
+.btn{border:0;border-radius:8px;padding:10px 13px;font-weight:700;cursor:pointer;background:#1d4ed8;color:white}
+.btn.secondary{background:#e8edf7;color:#172033}
+.btn.danger{background:#b42318}
+.btn:disabled{opacity:.45;cursor:not-allowed}
+.note{font-size:13px;line-height:1.5;color:#667085}
+.status{margin-top:10px;padding:10px;border-radius:8px;background:#f2f4f7;font-size:13px}
+.fields{display:grid;grid-template-columns:repeat(4,1fr);gap:7px}
+.fields input{min-width:0;width:100%;padding:9px;border:1px solid #d0d5dd;border-radius:7px}
+.slots{font-size:13px;color:#475467;line-height:1.7;margin-top:10px;white-space:pre-wrap}
+.preview{display:none;padding:10px;border:1px solid #f5b942;background:#fffaeb;border-radius:8px;margin-top:10px;font-size:13px}
+.preview.visible{display:block}
+.slot-item{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid #eaecf0}
+.slot-item button{border:0;border-radius:6px;padding:5px 8px;cursor:pointer;background:#fee4e2;color:#912018}
+@media(max-width:760px){
+.stats{grid-template-columns:repeat(2,1fr)}
+.layout{grid-template-columns:1fr}
+.panel{padding:14px}
+.fields{grid-template-columns:repeat(2,1fr)}
+.btn{padding:10px}
+}
+</style>
+</head>
+<body>
+<header class="top">
+<h1>Smart Parking AI</h1>
+<p>Continuous vehicle detection and parking occupancy dashboard</p>
+</header>
+
+<main class="wrap">
+<section class="stats">
+<div class="stat"><small>Vehicles detected</small><strong id="vehicles">0</strong></div>
+<div class="stat"><small>Total parking slots</small><strong id="total">0</strong></div>
+<div class="stat"><small>Occupied slots</small><strong id="occupied">0</strong></div>
+<div class="stat"><small>Available slots</small><strong id="available">0</strong></div>
+</section>
+
+<div class="layout">
+<section class="panel">
+<h2>Live camera and AI results</h2>
+<div class="stage" id="stage">
+<video id="camera" class="media" autoplay muted playsinline></video>
+<img id="processed" class="media" alt="Live AI annotated video" hidden>
+<canvas id="overlay" class="overlay"></canvas>
+</div>
+
+<div class="controls">
+<button class="btn" id="start">Start phone camera</button>
+<button class="btn danger" id="stop">Stop camera</button>
+<button class="btn secondary" id="toggle">Show AI result</button>
+</div>
+
+<p class="note">The raw camera preview remains live while AI processes frames in the background. AI results update continuously when each frame finishes processing. For a phone, open this page through HTTPS and allow camera permission.</p>
+<div id="message" class="status">Ready. Start the camera to begin detection.</div>
+</section>
+
+<section class="panel">
+<h2>Configure parking slots</h2>
+<p class="note">Recommended: tap “Draw slot”, then drag a rectangle over one parking space on the camera image. Review the yellow reference box and confirm it before adding. Save slots when finished.</p>
+
+<div class="controls">
+<button class="btn" id="draw">Draw slot on camera</button>
+<button class="btn secondary" id="cancelDraw" disabled>Cancel drawing</button>
+</div>
+
+<div id="preview" class="preview">
+<strong>Reference box preview</strong>
+<div id="previewText">Drag a rectangle on the camera image.</div>
+<div class="controls">
+<button class="btn" id="confirmSlot" disabled>Confirm &amp; add slot</button>
+</div>
+</div>
+
+<p class="note">Or enter coordinates manually:</p>
+<div class="fields">
+<input id="sid" placeholder="ID (e.g. S1)" value="S1">
+<input id="sx" type="number" placeholder="x" value="50">
+<input id="sy" type="number" placeholder="y" value="50">
+<input id="sw" type="number" placeholder="width" value="100">
+<input id="sh" type="number" placeholder="height" value="100">
+</div>
+
+<div class="controls">
+<button class="btn secondary" id="addManual">Add manual slot</button>
+<button class="btn" id="save">Save slots</button>
+<button class="btn secondary" id="clear">Clear all</button>
+</div>
+
+<div id="slotList" class="slots">No slots configured.</div>
+<p class="note">Green/red boxes in AI results mark detected vehicles. Parking occupancy is estimated when a detected vehicle's bounding-box center falls inside a saved slot rectangle. The standard YOLO model may not reliably recognize very small toy cars.</p>
+</section>
+</div>
+</main>
+
+<script>
+const video = document.getElementById('camera');
+const processed = document.getElementById('processed');
+const stage = document.getElementById('stage');
+const overlay = document.getElementById('overlay');
+const ctx = overlay.getContext('2d');
+const message = document.getElementById('message');
+
+let stream = null;
+let running = false;
+let showProcessed = false;
+let slots = [];
+let drawing = false;
+let dragStart = null;
+let dragCurrent = null;
+let previewSlot = null;
+let requestBusy = false;
+let lastSize = '';
+
+function say(s) {
+    message.textContent = s;
+}
+
+function activeMedia() {
+    return showProcessed && !processed.hidden && processed.naturalWidth
+        ? processed
+        : video;
+}
+
+function frameSize() {
+    const m = activeMedia();
+    return {
+        w: m.videoWidth || m.naturalWidth || 1280,
+        h: m.videoHeight || m.naturalHeight || 720
+    };
+}
+
+function fitRect() {
+    const sw = stage.clientWidth;
+    const sh = stage.clientHeight;
+    const fs = frameSize();
+    const scale = Math.min(sw / fs.w, sh / fs.h);
+    const w = fs.w * scale;
+    const h = fs.h * scale;
+
+    return {
+        x: (sw - w) / 2,
+        y: (sh - h) / 2,
+        w,
+        h,
+        scale,
+        fw: fs.w,
+        fh: fs.h
+    };
+}
+
+function syncCanvas() {
+    const w = stage.clientWidth;
+    const h = stage.clientHeight;
+
+    if (overlay.width !== w || overlay.height !== h) {
+        overlay.width = w;
+        overlay.height = h;
+    }
+
+    drawOverlay();
+}
+
+function toScreen(s) {
+    const r = fitRect();
+
+    return {
+        x: r.x + s.x * r.scale,
+        y: r.y + s.y * r.scale,
+        w: s.w * r.scale,
+        h: s.h * r.scale
+    };
+}
+
+function toFrame(p) {
+    const r = fitRect();
+
+    return {
+        x: Math.max(0, Math.min(r.fw, Math.round((p.x - r.x) / r.scale))),
+        y: Math.max(0, Math.min(r.fh, Math.round((p.y - r.y) / r.scale)))
+    };
+}
+
+function drawBox(s, color, label, dashed = false) {
+    const b = toScreen(s);
+
+    ctx.save();
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 2;
+    ctx.setLineDash(dashed ? [7, 4] : []);
+    ctx.strokeRect(b.x, b.y, b.w, b.h);
+    ctx.setLineDash([]);
+    ctx.font = 'bold 12px Arial';
+
+    const text = label || s.id || 'Slot';
+    const tw = ctx.measureText(text).width + 10;
+
+    ctx.fillStyle = color;
+    ctx.fillRect(b.x, Math.max(0, b.y - 20), tw, 20);
+    ctx.fillStyle = '#fff';
+    ctx.fillText(text, b.x + 5, Math.max(14, b.y - 6));
+    ctx.restore();
+}
+
+function drawOverlay() {
+    if (!ctx) return;
+
+    ctx.clearRect(0, 0, overlay.width, overlay.height);
+
+    for (const s of slots) {
+        drawBox(s, '#f59e0b', s.id || 'Slot');
+    }
+
+    if (previewSlot) {
+        drawBox(previewSlot, '#fde047', 'Preview — confirm slot', true);
+    }
+
+    if (dragStart && dragCurrent) {
+        const a = toFrame(dragStart);
+        const b = toFrame(dragCurrent);
+
+        const s = {
+            x: Math.min(a.x, b.x),
+            y: Math.min(a.y, b.y),
+            w: Math.abs(a.x - b.x),
+            h: Math.abs(a.y - b.y)
+        };
+
+        if (s.w > 1 && s.h > 1) {
+            drawBox(s, '#fde047', 'Reference preview', true);
+        }
+    }
+}
+
+function drawSlots() {
+    const list = document.getElementById('slotList');
+    list.innerHTML = '';
+
+    if (!slots.length) {
+        list.textContent = 'No slots configured.';
+    } else {
+        slots.forEach((s, i) => {
+            const row = document.createElement('div');
+            row.className = 'slot-item';
+
+            const label = document.createElement('span');
+            label.textContent =
+                `${s.id}: x=${s.x}, y=${s.y}, w=${s.w}, h=${s.h}`;
+
+            const del = document.createElement('button');
+            del.textContent = 'Remove';
+
+            del.onclick = async () => {
+                slots.splice(i, 1);
+                drawSlots();
+                drawOverlay();
+
+                try {
+                    await persistSlots(true);
+                    say('Slot removed and saved.');
+                } catch (e) {}
+            };
+
+            row.append(label, del);
+            list.appendChild(row);
+        });
+    }
+
+    document.getElementById('total').textContent = slots.length;
+    drawOverlay();
+}
+
+async function loadSlots() {
+    try {
+        const r = await fetch('/api/slots');
+
+        if (!r.ok) {
+            throw Error('Could not load slots: HTTP ' + r.status);
+        }
+
+        slots = await r.json();
+        drawSlots();
+        await refreshStatus();
+    } catch (e) {
+        say('Could not load slots. Is the server running? ' + e.message);
+    }
+}
+
+async function persistSlots(quiet = false) {
+    try {
+        const r = await fetch('/api/slots', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({slots})
+        });
+
+        const d = await r.json();
+
+        if (!r.ok) {
+            throw Error(d.error || 'Save failed');
+        }
+
+        slots = d.slots;
+        drawSlots();
+
+        if (d.status) {
+            updateStats(d.status);
+        }
+
+        if (!quiet) {
+            say('Parking slots saved.');
+        }
+    } catch (e) {
+        say('Could not save slots: ' + e.message);
+        throw e;
+    }
+}
+
+function updateStats(s) {
+    document.getElementById('vehicles').textContent =
+        s.vehicles_detected ?? 0;
+
+    document.getElementById('total').textContent =
+        s.slots_total ?? slots.length;
+
+    document.getElementById('occupied').textContent =
+        s.slots_occupied ?? 0;
+
+    document.getElementById('available').textContent =
+        s.slots_available ??
+        Math.max(0, slots.length - (s.slots_occupied ?? 0));
+}
+
+async function refreshStatus() {
+    try {
+        const r = await fetch('/api/status');
+
+        if (r.ok) {
+            updateStats(await r.json());
+        }
+    } catch (e) {
+        // Status refresh is best effort.
+    }
+}
+
+function setDrawing(on) {
+    drawing = on;
+    overlay.classList.toggle('drawing', on);
+    overlay.style.pointerEvents = on ? 'auto' : 'none';
+
+    document.getElementById('cancelDraw').disabled = !on;
+    document.getElementById('draw').disabled = on;
+
+    if (on) {
+        document.getElementById('preview').classList.add('visible');
+        document.getElementById('previewText').textContent =
+            'Drag from one corner to the opposite corner of a parking space.';
+        say('Drawing mode: drag a rectangle around one parking slot.');
+    } else {
+        dragStart = null;
+        dragCurrent = null;
+        drawOverlay();
+    }
+}
+
+document.getElementById('draw').onclick = () => {
+    if (!stream) {
+        say('Start the phone camera before drawing a slot.');
+        return;
+    }
+
+    setDrawing(true);
+};
+
+document.getElementById('cancelDraw').onclick = () => {
+    setDrawing(false);
+    previewSlot = null;
+    document.getElementById('confirmSlot').disabled = true;
+    drawOverlay();
+    say('Slot drawing cancelled.');
+};
+
+function pointerPos(e) {
+    const r = stage.getBoundingClientRect();
+
+    return {
+        x: e.clientX - r.left,
+        y: e.clientY - r.top
+    };
+}
+
+overlay.addEventListener('pointerdown', e => {
+    if (!drawing) return;
+
+    e.preventDefault();
+
+    const p = pointerPos(e);
+    const r = fitRect();
+
+    if (
+        p.x < r.x || p.y < r.y ||
+        p.x > r.x + r.w || p.y > r.y + r.h
+    ) {
+        return;
+    }
+
+    overlay.setPointerCapture(e.pointerId);
+    dragStart = p;
+    dragCurrent = p;
+    previewSlot = null;
+    drawOverlay();
+});
+
+overlay.addEventListener('pointermove', e => {
+    if (!drawing || !dragStart) return;
+
+    dragCurrent = pointerPos(e);
+    drawOverlay();
+});
+
+overlay.addEventListener('pointerup', e => {
+    if (!drawing || !dragStart) return;
+
+    dragCurrent = pointerPos(e);
+
+    const a = toFrame(dragStart);
+    const b = toFrame(dragCurrent);
+
+    previewSlot = {
+        id: document.getElementById('sid').value.trim() ||
+            `S${slots.length + 1}`,
+        x: Math.min(a.x, b.x),
+        y: Math.min(a.y, b.y),
+        w: Math.abs(a.x - b.x),
+        h: Math.abs(a.y - b.y)
+    };
+
+    dragStart = null;
+    dragCurrent = null;
+
+    if (previewSlot.w < 8 || previewSlot.h < 8) {
+        previewSlot = null;
+
+        document.getElementById('previewText').textContent =
+            'That rectangle is too small. Draw a larger box.';
+
+        document.getElementById('confirmSlot').disabled = true;
+    } else {
+        document.getElementById('previewText').textContent =
+            `${previewSlot.id}: x=${previewSlot.x}, y=${previewSlot.y}, ` +
+            `width=${previewSlot.w}, height=${previewSlot.h}. ` +
+            'Confirm to add this reference box.';
+
+        document.getElementById('confirmSlot').disabled = false;
+    }
+
+    drawOverlay();
+});
+
+document.getElementById('confirmSlot').onclick = async () => {
+    if (!previewSlot) return;
+
+    slots.push({...previewSlot});
+    document.getElementById('sid').value = `S${slots.length + 1}`;
+    previewSlot = null;
+
+    document.getElementById('confirmSlot').disabled = true;
+    document.getElementById('previewText').textContent =
+        'Slot added and saving automatically…';
+
+    setDrawing(false);
+    drawSlots();
+
+    try {
+        await persistSlots(true);
+
+        document.getElementById('previewText').textContent =
+            'Slot saved. Draw another slot when ready.';
+
+        say('Slot confirmed and saved. Total slots: ' + slots.length);
+    } catch (e) {
+        document.getElementById('previewText').textContent =
+            'Slot added on screen, but save failed. Check the message and retry Save slots.';
+    }
+};
+
+document.getElementById('addManual').onclick = async () => {
+    const s = {
+        id: document.getElementById('sid').value.trim() ||
+            `S${slots.length + 1}`,
+        x: +document.getElementById('sx').value,
+        y: +document.getElementById('sy').value,
+        w: +document.getElementById('sw').value,
+        h: +document.getElementById('sh').value
+    };
+
+    if (s.w <= 0 || s.h <= 0) {
+        say('Slot width and height must be greater than zero.');
+        return;
+    }
+
+    slots.push(s);
+    drawSlots();
+    document.getElementById('sid').value = `S${slots.length + 1}`;
+
+    try {
+        await persistSlots(true);
+        say('Manual slot added and saved. Total slots: ' + slots.length);
+    } catch (e) {}
+};
+
+document.getElementById('save').onclick = () => persistSlots(false);
+
+document.getElementById('clear').onclick = async () => {
+    if (!confirm('Remove all parking slots?')) return;
+
+    slots = [];
+    drawSlots();
+
+    try {
+        await persistSlots(true);
+        say('All slots cleared.');
+    } catch (e) {}
+};
+
+/* Corrected AI-result toggle */
+function setProcessedMode(on) {
+    showProcessed = on;
+
+    video.hidden = on;
+    processed.hidden = !on;
+
+    document.getElementById('toggle').textContent =
+        on ? 'Show live camera' : 'Show AI result';
+
+    if (on) {
+        processed.onerror = () => {
+            say('AI video stream failed. Check the Flask video_feed route.');
+        };
+
+        processed.onload = () => {
+            syncCanvas();
+        };
+
+        processed.src = '/video_feed?t=' + Date.now();
+    } else {
+        processed.removeAttribute('src');
+        syncCanvas();
+    }
+}
+
+document.getElementById('toggle').onclick = () => {
+    setProcessedMode(!showProcessed);
+};
+
+async function sendOneFrame() {
+    if (!running || !stream || requestBusy || video.readyState < 2) {
+        return;
+    }
+
+    requestBusy = true;
+
+    try {
+        const canvas = document.createElement('canvas');
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
+
+        canvas.getContext('2d').drawImage(
+            video, 0, 0, canvas.width, canvas.height
+        );
+
+        const blob = await new Promise(resolve =>
+            canvas.toBlob(resolve, 'image/jpeg', 0.62)
+        );
+
+        if (!blob) return;
+
+        const fd = new FormData();
+        fd.append('frame', blob, 'frame.jpg');
+
+        const r = await fetch('/api/frame', {
+            method: 'POST',
+            body: fd
+        });
+
+        const d = await r.json();
+
+        if (!r.ok) {
+            throw Error(d.error || 'Frame upload failed');
+        }
+
+        const s = d.status;
+        updateStats(s);
+
+        say(
+            `AI updated · ${s.vehicles_detected} vehicle(s) · ` +
+            `${s.slots_total} slot(s) · ${s.updated_at || 'now'}`
+        );
+    } catch (e) {
+        say('AI frame error: ' + e.message);
+    } finally {
+        requestBusy = false;
+    }
+}
+
+async function frameLoop() {
+    while (running) {
+        await sendOneFrame();
+        await new Promise(resolve => setTimeout(resolve, 250));
+    }
+}
+
+document.getElementById('start').onclick = async () => {
+    try {
+        if (stream) return;
+
+        if (!navigator.mediaDevices ||
+            !navigator.mediaDevices.getUserMedia) {
+            throw Error('Camera access requires HTTPS or localhost.');
+        }
+
+        stream = await navigator.mediaDevices.getUserMedia({
+            video: {
+                facingMode: {ideal: 'environment'},
+                width: {ideal: 1280},
+                height: {ideal: 720}
+            },
+            audio: false
+        });
+
+        video.srcObject = stream;
+        await video.play();
+
+        running = true;
+        document.getElementById('start').disabled = true;
+
+        video.onloadedmetadata = () => syncCanvas();
+
+        setProcessedMode(false);
+
+        say('Phone camera is live. AI detection is running continuously in the background.');
+
+        frameLoop();
+    } catch (e) {
+        if (stream) {
+            stream.getTracks().forEach(track => track.stop());
+        }
+
+        stream = null;
+        running = false;
+        document.getElementById('start').disabled = false;
+
+        say(
+            'Camera error: ' + e.message +
+            '. Check permission and use HTTPS when accessing from another device.'
+        );
+    }
+};
+
+document.getElementById('stop').onclick = () => {
+    running = false;
+    requestBusy = false;
+
+    if (stream) {
+        stream.getTracks().forEach(t => t.stop());
+    }
+
+    stream = null;
+    video.srcObject = null;
+
+    document.getElementById('start').disabled = false;
+
+    setProcessedMode(false);
+    say('Camera stopped.');
+};
+
+processed.onload = syncCanvas;
+video.addEventListener('loadedmetadata', syncCanvas);
+window.addEventListener('resize', syncCanvas);
+
+loadSlots();
+</script>
+</body>
+</html>

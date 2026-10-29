@@ -1,0 +1,194 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Smart Parking – Monitor</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: system-ui, sans-serif; background: #0e1116; color: #e8ecf1; }
+  header { padding: 14px 24px; background: #161b22; display: flex; gap: 24px; align-items: center; flex-wrap: wrap; }
+  header h1 { margin: 0; font-size: 20px; }
+  .stat { font-size: 14px; color: #9aa6b4; }
+  .stat b { color: #fff; font-size: 18px; margin-left: 4px; }
+  main { padding: 18px 24px 40px; }
+  .panels { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+  @media (max-width: 900px) { .panels { grid-template-columns: 1fr; } }
+  .panel { background: #161b22; border-radius: 12px; padding: 12px; }
+  .panel h2 { margin: 0 0 10px; font-size: 15px; font-weight: 600; color: #9aa6b4; }
+  .view { position: relative; background: #000; border-radius: 8px; overflow: hidden; min-height: 200px; line-height: 0; }
+  .view img { width: 100%; display: block; }
+  .view canvas { position: absolute; inset: 0; width: 100%; height: 100%; cursor: crosshair; }
+  .placeholder { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: #667; font-size: 14px; line-height: 1.4; text-align: center; padding: 20px; }
+  .editor { margin-top: 18px; }
+  .editor p { color: #9aa6b4; font-size: 14px; margin: 4px 0 12px; }
+  table { border-collapse: collapse; width: 100%; max-width: 640px; }
+  th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid #262d38; font-size: 14px; }
+  input { background: #0e1116; color: #fff; border: 1px solid #333c4a; border-radius: 6px; padding: 5px 8px; width: 90px; }
+  button { background: #2d6cdf; color: #fff; border: 0; border-radius: 8px; padding: 8px 16px; font-weight: 600; cursor: pointer; margin-right: 8px; }
+  button.secondary { background: #2a313c; }
+  button.danger { background: #8b2a2a; padding: 4px 10px; }
+  #saveMsg { color: #7bd88f; font-size: 14px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>🛠 Monitor</h1>
+  <div class="stat">Frames received<b id="frames">0</b></div>
+  <div class="stat">Vehicles detected<b id="veh">0</b></div>
+  <div class="stat">Slots occupied<b id="occ">0</b> / <b id="tot">0</b></div>
+  <div class="stat">AI time per frame<b id="ms">–</b></div>
+  <div class="stat">Last frame<b id="upd">–</b></div>
+</header>
+
+<main>
+  <div class="panels">
+    <div class="panel">
+      <h2>1 · What the phone camera is sending (draw parking slots here)</h2>
+      <div class="view" id="rawView">
+        <img id="rawImg" src="/raw_feed" alt="">
+        <canvas id="overlay"></canvas>
+        <div class="placeholder" id="rawPh">Waiting for the phone…<br>Open /camera on your phone and tap Start.</div>
+      </div>
+    </div>
+    <div class="panel">
+      <h2>2 · What the AI detects</h2>
+      <div class="view">
+        <img id="aiImg" src="/video_feed" alt="">
+        <div class="placeholder" id="aiPh">Waiting for the first processed frame…</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="editor">
+    <h2 style="font-size:17px">Parking slots</h2>
+    <p>Click and drag on the left (camera) image to draw a slot rectangle. Then press <b>Save slots</b>.</p>
+    <table>
+      <thead><tr><th>ID</th><th>x</th><th>y</th><th>w</th><th>h</th><th></th></tr></thead>
+      <tbody id="slotRows"></tbody>
+    </table>
+    <p style="margin-top:14px">
+      <button id="saveBtn">Save slots</button>
+      <button id="clearBtn" class="secondary">Clear all</button>
+      <span id="saveMsg"></span>
+    </p>
+  </div>
+</main>
+
+<script>
+const rawImg = document.getElementById('rawImg');
+const aiImg = document.getElementById('aiImg');
+const overlay = document.getElementById('overlay');
+const ctx = overlay.getContext('2d');
+let slots = [];
+let frameW = 0, frameH = 0;
+let drag = null;
+
+// Hide placeholders when the first frame arrives
+rawImg.onload = () => { document.getElementById('rawPh').style.display = 'none'; draw(); };
+aiImg.onload = () => { document.getElementById('aiPh').style.display = 'none'; };
+
+function resizeOverlay() {
+  overlay.width = rawImg.clientWidth;
+  overlay.height = rawImg.clientHeight;
+  draw();
+}
+new ResizeObserver(resizeOverlay).observe(rawImg);
+
+function scale() { return frameW ? overlay.width / frameW : 1; }
+
+function draw() {
+  ctx.clearRect(0, 0, overlay.width, overlay.height);
+  const k = scale();
+  ctx.lineWidth = 2; ctx.font = '13px sans-serif';
+  slots.forEach(s => {
+    ctx.strokeStyle = '#ffb400'; ctx.fillStyle = '#ffb400';
+    ctx.strokeRect(s.x * k, s.y * k, s.w * k, s.h * k);
+    ctx.fillText(s.id, s.x * k + 4, s.y * k + 15);
+  });
+  if (drag) {
+    ctx.strokeStyle = '#4fc3f7';
+    ctx.strokeRect(drag.x0, drag.y0, drag.x1 - drag.x0, drag.y1 - drag.y0);
+  }
+}
+
+function pos(e) {
+  const r = overlay.getBoundingClientRect();
+  return { x: e.clientX - r.left, y: e.clientY - r.top };
+}
+overlay.addEventListener('mousedown', e => { const p = pos(e); drag = { x0: p.x, y0: p.y, x1: p.x, y1: p.y }; });
+overlay.addEventListener('mousemove', e => { if (!drag) return; const p = pos(e); drag.x1 = p.x; drag.y1 = p.y; draw(); });
+window.addEventListener('mouseup', () => {
+  if (!drag) return;
+  const k = scale();
+  const x = Math.min(drag.x0, drag.x1) / k, y = Math.min(drag.y0, drag.y1) / k;
+  const w = Math.abs(drag.x1 - drag.x0) / k, h = Math.abs(drag.y1 - drag.y0) / k;
+  drag = null;
+  if (frameW && w > 8 && h > 8) {
+    slots.push({ id: nextId(), x: Math.round(x), y: Math.round(y), w: Math.round(w), h: Math.round(h) });
+    renderRows();
+  }
+  draw();
+});
+
+function nextId() {
+  let n = slots.length + 1;
+  while (slots.some(s => s.id === 'S' + n)) n++;
+  return 'S' + n;
+}
+
+function renderRows() {
+  const body = document.getElementById('slotRows');
+  body.innerHTML = '';
+  slots.forEach((s, i) => {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td><input value="${s.id}" data-i="${i}" data-k="id"></td>` +
+      ['x', 'y', 'w', 'h'].map(k => `<td><input type="number" value="${s[k]}" data-i="${i}" data-k="${k}"></td>`).join('') +
+      `<td><button class="danger" data-del="${i}">Delete</button></td>`;
+    body.appendChild(tr);
+  });
+  draw();
+}
+document.getElementById('slotRows').addEventListener('input', e => {
+  const i = e.target.dataset.i, k = e.target.dataset.k;
+  if (i === undefined) return;
+  slots[i][k] = k === 'id' ? e.target.value : Number(e.target.value);
+  draw();
+});
+document.getElementById('slotRows').addEventListener('click', e => {
+  if (e.target.dataset.del !== undefined) { slots.splice(Number(e.target.dataset.del), 1); renderRows(); }
+});
+document.getElementById('clearBtn').onclick = () => { slots = []; renderRows(); };
+document.getElementById('saveBtn').onclick = async () => {
+  const res = await fetch('/api/slots', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ slots }) });
+  const data = await res.json();
+  if (data.ok) { slots = data.slots; renderRows(); }
+  const msg = document.getElementById('saveMsg');
+  msg.textContent = data.ok ? 'Saved ✓' : 'Save failed';
+  setTimeout(() => msg.textContent = '', 2500);
+};
+
+async function poll() {
+  try {
+    const st = await fetch('/api/status').then(r => r.json());
+    frameW = st.frame_w; frameH = st.frame_h;
+    document.getElementById('frames').textContent = st.frames_received;
+    document.getElementById('veh').textContent = st.vehicles_detected;
+    document.getElementById('occ').textContent = st.slots_occupied;
+    document.getElementById('tot').textContent = st.slots_total;
+    document.getElementById('ms').textContent = st.processing_ms ? st.processing_ms + ' ms' : '–';
+    document.getElementById('upd').textContent = st.updated_at ? st.updated_at.split(' ')[1] : '–';
+    draw();
+  } catch (e) {}
+}
+
+(async () => {
+  slots = await fetch('/api/slots').then(r => r.json());
+  renderRows();
+  poll();
+  setInterval(poll, 700);
+})();
+</script>
+</body>
+</html>

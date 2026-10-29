@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Parking Camera</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: system-ui, sans-serif; background: #0e1116; color: #e8ecf1; min-height: 100vh; display: flex; flex-direction: column; }
+  header { padding: 14px 16px; font-weight: 600; font-size: 18px; }
+  .video-wrap { position: relative; margin: 0 12px; border-radius: 14px; overflow: hidden; background: #000; aspect-ratio: 3 / 4; }
+  video { width: 100%; height: 100%; object-fit: cover; }
+  .badge { position: absolute; top: 10px; left: 10px; padding: 5px 10px; border-radius: 999px; font-size: 13px; background: rgba(0,0,0,.6); }
+  .badge.live { background: #c62828; }
+  .controls { display: flex; gap: 10px; padding: 14px 12px; }
+  button { flex: 1; padding: 14px; border: 0; border-radius: 12px; font-size: 16px; font-weight: 600; background: #2d6cdf; color: #fff; }
+  button.secondary { background: #2a313c; }
+  button.stop { background: #c62828; }
+  button:disabled { opacity: .5; }
+  .stats { padding: 0 16px 20px; font-size: 14px; line-height: 1.7; color: #aab4c0; }
+  .stats b { color: #fff; }
+  #msg { color: #ffb74d; padding: 0 16px; font-size: 14px; }
+</style>
+</head>
+<body>
+<header>📷 Parking Camera</header>
+<div class="video-wrap">
+  <video id="video" autoplay playsinline muted></video>
+  <div id="badge" class="badge">Camera off</div>
+</div>
+<div class="controls">
+  <button id="startBtn">Start camera</button>
+  <button id="flipBtn" class="secondary" disabled>Flip</button>
+</div>
+<div id="msg"></div>
+<div class="stats">
+  Frames sent: <b id="sent">0</b><br>
+  Server time per frame: <b id="ms">–</b><br>
+  Cars detected by AI: <b id="cars">–</b><br>
+  Send rate: <b id="fps">–</b>
+</div>
+
+<canvas id="canvas" hidden></canvas>
+<script>
+const video = document.getElementById('video');
+const canvas = document.getElementById('canvas');
+const startBtn = document.getElementById('startBtn');
+const flipBtn = document.getElementById('flipBtn');
+const badge = document.getElementById('badge');
+const msg = document.getElementById('msg');
+const SEND_WIDTH = 640;       // frame width sent to the server
+const JPEG_QUALITY = 0.7;
+const MIN_INTERVAL_MS = 150;  // at most ~6 fps; actual rate depends on the AI speed
+
+let stream = null, running = false, facing = 'environment', sent = 0;
+
+async function openCamera() {
+  if (stream) stream.getTracks().forEach(t => t.stop());
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    msg.textContent = 'Camera needs HTTPS. Open this page through the https:// tunnel link, not http://.';
+    throw new Error('no getUserMedia');
+  }
+  stream = await navigator.mediaDevices.getUserMedia({
+    video: { facingMode: { ideal: facing }, width: { ideal: 1280 }, height: { ideal: 720 } },
+    audio: false,
+  });
+  video.srcObject = stream;
+  await video.play();
+}
+
+async function loop() {
+  const ctx = canvas.getContext('2d');
+  let lastDone = performance.now();
+  while (running) {
+    const t0 = performance.now();
+    if (video.videoWidth) {
+      const scale = SEND_WIDTH / video.videoWidth;
+      canvas.width = SEND_WIDTH;
+      canvas.height = Math.round(video.videoHeight * scale);
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      const blob = await new Promise(r => canvas.toBlob(r, 'image/jpeg', JPEG_QUALITY));
+      try {
+        const form = new FormData();
+        form.append('frame', blob, 'frame.jpg');
+        const res = await fetch('/api/frame', { method: 'POST', body: form });
+        const data = await res.json();
+        if (data.ok) {
+          sent++;
+          document.getElementById('sent').textContent = sent;
+          document.getElementById('ms').textContent = data.status.processing_ms + ' ms';
+          document.getElementById('cars').textContent = data.status.vehicles_detected;
+          const now = performance.now();
+          document.getElementById('fps').textContent = (1000 / (now - lastDone)).toFixed(1) + ' fps';
+          lastDone = now;
+          msg.textContent = '';
+        }
+      } catch (e) {
+        msg.textContent = 'Cannot reach the laptop server. Is it running and the tunnel open?';
+        await new Promise(r => setTimeout(r, 1500));
+      }
+    }
+    // Wait for the server's reply before sending the next frame, so frames never pile up.
+    const wait = MIN_INTERVAL_MS - (performance.now() - t0);
+    if (wait > 0) await new Promise(r => setTimeout(r, wait));
+  }
+}
+
+startBtn.onclick = async () => {
+  if (!running) {
+    try { await openCamera(); } catch (e) { if (!msg.textContent) msg.textContent = 'Camera error: ' + e.message; return; }
+    running = true;
+    startBtn.textContent = 'Stop';
+    startBtn.classList.add('stop');
+    flipBtn.disabled = false;
+    badge.textContent = '● LIVE';
+    badge.classList.add('live');
+    try { await navigator.wakeLock?.request('screen'); } catch (e) {}  // keep screen on
+    loop();
+  } else {
+    running = false;
+    if (stream) stream.getTracks().forEach(t => t.stop());
+    video.srcObject = null;
+    startBtn.textContent = 'Start camera';
+    startBtn.classList.remove('stop');
+    flipBtn.disabled = true;
+    badge.textContent = 'Camera off';
+    badge.classList.remove('live');
+  }
+};
+
+flipBtn.onclick = async () => {
+  facing = facing === 'environment' ? 'user' : 'environment';
+  try { await openCamera(); } catch (e) { msg.textContent = 'Could not switch camera.'; }
+};
+</script>
+</body>
+</html>
